@@ -1,59 +1,186 @@
-//
-//  ContentView.swift
-//  Menu Bar Terminal
-//
-//  Created by Jack Mangano on 4/25/25.
-//
-
 import SwiftUI
-import SwiftData
+import Combine
+import Foundation
 
+/// Main pop‑over view that provides a text box for running shell commands.
+/// Each command runs in its own long‑lived PTY shell so multiple programs
+/// can run concurrently.  A tab bar lets you switch between sessions.
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
-
+    
+    // MARK: – Session model
+    struct Session: Identifiable {
+        let id: UUID
+        let shell: Shell
+        var log: String = ""
+        var title: String
+    }
+    
+    // MARK: – State
+    @State private var command: String = ""
+    @State private var sessions: [Session] = []
+    @State private var activeSessionID: UUID?
+    @State private var scrollTrigger = 0
+    @State private var outputObserver: AnyCancellable?
+    
+    // MARK: – Body
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+        ScrollViewReader { proxy in
+            VStack(spacing: 8) {
+                
+                // Tabs
+                HStack(spacing: 4) {
+                    ForEach(sessions) { session in
+                        Button(action: { activeSessionID = session.id }) {
+                            HStack(spacing: 4) {
+                                Text(session.title)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 9))
+                                    .onTapGesture { closeSession(session.id) }
+                            }
+                            .padding(.vertical, 2)
+                            .padding(.horizontal, 8)
+                            .background(session.id == activeSessionID
+                                        ? Color.accentColor.opacity(0.3)
+                                        : Color.gray.opacity(0.2))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    
+                    // New‑session (“+”) button
+                    Button(action: { createNewSession() }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                
+                // Input
+                HStack {
+                    TextField("Enter shell command…", text: $command)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .onSubmit(runCommand)
+                    
+                    Button("Run") { runCommand() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                
+                // Log output
+                ScrollView {
+                    Text(activeSession?.log ?? "")
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)        // allow copy/select
+                    
+                    Color.clear
+                        .frame(height: 1)
+                        .id("BOTTOM")
+                }
+                .onChange(of: scrollTrigger) { _, _ in
+                    withAnimation {
+                        proxy.scrollTo("BOTTOM", anchor: .bottom)
                     }
                 }
-                .onDelete(perform: deleteItems)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
+            .padding()
+            .frame(minWidth: 700, minHeight: 500)
+        }
+        .onAppear {
+            createInitialSession()
+            attachOutputObserver()
+        }
+    }
+    
+    // MARK: – Computed helpers
+    private var activeSessionIndex: Int? {
+        sessions.firstIndex { $0.id == activeSessionID }
+    }
+    
+    private var activeSession: Session? {
+        guard let idx = activeSessionIndex else { return nil }
+        return sessions[idx]
+    }
+    
+    // MARK: – Actions
+    private func createInitialSession() {
+        let shell = Shell()
+        let sess  = Session(id: shell.id, shell: shell, title: "Tab 1")
+        sessions = [sess]
+        activeSessionID = sess.id
+    }
+    
+    private func createNewSession() {
+        let shell  = Shell()
+        let title  = "Tab \(sessions.count + 1)"
+        let sess   = Session(id: shell.id, shell: shell, title: title)
+        sessions.append(sess)
+        activeSessionID = sess.id
+    }
+    
+    private func closeSession(_ id: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[idx].shell.send("exit")
+        sessions.remove(at: idx)
+        
+        if sessions.isEmpty {
+            createInitialSession()
+        } else {
+            activeSessionID = sessions.first?.id
+        }
+    }
+    
+    private func runCommand() {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = activeSessionIndex else { return }
+        
+        sessions[idx].shell.send(trimmed)
+        command = ""
+    }
+    
+    /// Expand tabs (ASCII 9) to the next tab stop so column output like `ls` aligns.
+    /// Default tab size is 8, matching most terminals.
+    private func expandTabs(_ s: String, tabSize: Int = 8) -> String {
+        var result = ""
+        var column = 0
+        for scalar in s.unicodeScalars {
+            if scalar == "\t" {
+                let spaces = tabSize - (column % tabSize)
+                result.append(String(repeating: " ", count: spaces))
+                column += spaces
+            } else {
+                result.unicodeScalars.append(scalar)
+                if scalar == "\n" || scalar == "\r" {
+                    column = 0
+                } else {
+                    column += 1
                 }
             }
-        } detail: {
-            Text("Select an item")
         }
+        return result
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+    // MARK: – Output handling
+    private func attachOutputObserver() {
+        outputObserver = NotificationCenter.default.publisher(for: .shellDidOutput)
+            .sink { note in
+                guard let id   = note.userInfo?["id"]     as? UUID,
+                      let text = note.userInfo?["output"] as? String,
+                      let idx  = sessions.firstIndex(where: { $0.id == id }) else { return }
+                
+                sessions[idx].log.append(expandTabs(text))
+                
+                if id == activeSessionID {
+                    scrollTrigger += 1
+                }
             }
-        }
     }
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
 }
