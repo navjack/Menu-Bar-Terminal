@@ -37,16 +37,16 @@ class Shell {
             env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         }
         task.environment = env
-        task.standardInput = FileHandle(fileDescriptor: slave)
-        task.standardOutput = FileHandle(fileDescriptor: slave)
-        task.standardError = FileHandle(fileDescriptor: slave)
+        task.standardInput = FileHandle(fileDescriptor: secondary)
+        task.standardOutput = FileHandle(fileDescriptor: secondary)
+        task.standardError = FileHandle(fileDescriptor: secondary)
         task.launch()
 
         // Start a background reader that forwards shell output to the main thread.
         readerQueue.async { [weak self] in
-            let fileHandle = FileHandle(fileDescriptor: master)
+            let fileHandle = FileHandle(fileDescriptor: pty)
             while let strongSelf = self, strongSelf.task.isRunning {
-                let data = fh.availableData
+                let data = fileHandle.availableData
                 if data.isEmpty { break }
                 if let str = String(data: data, encoding: .utf8) {
                     print(str, terminator: "")
