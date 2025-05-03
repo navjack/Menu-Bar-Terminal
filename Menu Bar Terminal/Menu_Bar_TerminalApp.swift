@@ -1,5 +1,5 @@
-import SwiftUI
 import AppKit
+import SwiftUI
 
 @main
 struct MenuBarTerminalApp: App {
@@ -18,7 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var popover = NSPopover()
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func applicationDidFinishLaunching(_: Notification) {
         // Create the popover content
         popover.contentSize = NSSize(width: 400, height: 120)
         popover.behavior = .transient
